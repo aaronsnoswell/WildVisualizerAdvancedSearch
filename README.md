@@ -101,6 +101,16 @@ This repo is built on top of MiniConf from [Hendrik Strobelt](http://twitter.com
 Please consider citing the following papers if you find this dataset useful:
 
 ```
+@inproceedings{deng2024wildvis,
+  title     = "{W}ild{V}is: Open Source Visualizer for Million-Scale Chat Logs in the Wild",
+  author    = "Deng, Yuntian and Zhao, Wenting and Hessel, Jack and Ren, Xiang and Cardie, Claire and Choi, Yejin",
+  booktitle = "Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing: System Demonstrations",
+  year      = "2024",
+  url       = "https://aclanthology.org/2024.emnlp-demo.50/"
+}
+```
+
+```
 @inproceedings{
   zhao2024wildchat,
   title={WildChat: 1M Chat{GPT} Interaction Logs in the Wild},
@@ -108,15 +118,5 @@ Please consider citing the following papers if you find this dataset useful:
   booktitle={The Twelfth International Conference on Learning Representations},
   year={2024},
   url={https://openreview.net/forum?id=Bl8u7ZRlbM}
-}
-```
-
-```
-@inproceedings{deng2024wildvis,
-  title     = "{W}ild{V}is: Open Source Visualizer for Million-Scale Chat Logs in the Wild",
-  author    = "Deng, Yuntian and Zhao, Wenting and Hessel, Jack and Ren, Xiang and Cardie, Claire and Choi, Yejin",
-  booktitle = "Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing: System Demonstrations",
-  year      = "2024",
-  url       = "https://aclanthology.org/2024.emnlp-demo.50/"
 }
 ```
