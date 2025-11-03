@@ -15,6 +15,13 @@ import gzip
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import threading
+
+# Thread lock for database operations
+db_lock = threading.Lock()
+
+# Thread lock for embedding model
+model_lock = threading.Lock()
 n_per_language = 50000  # Adjust as needed
 LANGUAGES = ['all', 'english', 'chinese', 'russian', 'spanish', 'french', 'portuguese', 'german', 'italian', 'turkish', 'arabic', 'japanese', 'korean', 'polish', 'vietnamese']
 
@@ -37,24 +44,47 @@ def create_database(db_name):
     return db_name
 
 def insert_or_update(db_name, key, prompt, embedding):
-    conn = sqlite3.connect(db_name)
-    c = conn.cursor()
-    c.execute('''INSERT OR REPLACE INTO cache
-                 (key, prompt, embedding) VALUES (?, ?, ?)''', 
-                 (key, prompt, json.dumps(embedding)))
-    conn.commit()
-    conn.close()
+    """Thread safe version of insert_or_update()"""
+    with db_lock:  # Add lock
+        conn = sqlite3.connect(db_name, timeout=30.0)  # Add timeout
+        conn.execute(
+            "PRAGMA journal_mode=WAL"
+        )  # Enable WAL mode for better concurrency
+        c = conn.cursor()
+        c.execute(
+            """INSERT OR REPLACE INTO cache
+                     (key, prompt, embedding) VALUES (?, ?, ?)""",
+            (key, prompt, json.dumps(embedding)),
+        )
+        conn.commit()
+        conn.close()
+
+
+# def retrieve(db_name, key):
+#     conn = sqlite3.connect(db_name)
+#     c = conn.cursor()
+#     c.execute("SELECT prompt, embedding FROM cache WHERE key=?", (key,))
+#     result = c.fetchone()
+#     conn.close()
+#     if result:
+#         return True, json.loads(result[1])
+#     else:
+#         return False, None
+
 
 def retrieve(db_name, key):
-    conn = sqlite3.connect(db_name)
-    c = conn.cursor()
-    c.execute("SELECT prompt, embedding FROM cache WHERE key=?", (key,))
-    result = c.fetchone()
-    conn.close()
-    if result:
-        return True, json.loads(result[1])
-    else:
-        return False, None
+    """Thread safe version of retrieve()"""
+    with db_lock:  # Add lock
+        conn = sqlite3.connect(db_name, timeout=30.0)  # Add timeout
+        c = conn.cursor()
+        c.execute("SELECT prompt, embedding FROM cache WHERE key=?", (key,))
+        result = c.fetchone()
+        conn.close()
+        if result:
+            return True, json.loads(result[1])
+        else:
+            return False, None
+
 
 def get_embedding_with_cache(database_name, conversation_id, prompt, model='text-embedding-3-small'):
     key = conversation_id
