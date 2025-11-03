@@ -69,14 +69,52 @@
 
 {% block content %}
 <div class="row p-3"></div>
+
+{% if error %}
+<div class="alert alert-warning alert-dismissible fade show" role="alert">
+  <strong>Query Error:</strong> {{ error }}
+  <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+    <span aria-hidden="true">&times;</span>
+  </button>
+</div>
+{% endif %}
+
 <div class="row">
-    <div class="col-12 col-sm-12 col-md-6 col-lg-4">
-        <div class="input-group mb-3">
-            <input type="text" class="form-control typeahead_all filter-input" id="search-input" placeholder="Contains" value="{{ contains }}">
-            <div class="input-group-append">
-              <button class="btn btn-outline-secondary add-filter" type="button" data-filter="contains">+</button>
-            </div>
-        </div>
+  <div class="col-12">
+    <div class="mb-3">
+      <label for="search-query" class="form-label">
+        <strong>Search Query</strong>
+      </label>
+      <textarea id="search-query" class="form-control filter-input" rows="2">{{ search_query }}</textarea>
+      <small class="form-text text-muted">
+        <strong>Examples:</strong>
+        <a href="#" class="example-link" data-example='contains:"worried"&turn:user'>contains:"worried"&turn:user</a>
+        |
+        <a href="#" class="example-link" data-example='nocontains:"python"'>nocontains:"python"</a>
+        |
+        <a href="#" class="example-link"
+          data-example='contains:"help"&turn:user nocontains:"code"'>contains:"help"&turn:user nocontains:"code"</a>
+      </small>
+      <script>
+        (function () {
+          function setSearchQuery(value) {
+            var ta = document.getElementById('search-query');
+            if (!ta) return;
+            ta.value = value;
+            // trigger input event so any listeners update UI/buttons
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+            ta.focus();
+          }
+          document.querySelectorAll('.example-link').forEach(function (el) {
+            el.addEventListener('click', function (e) {
+              e.preventDefault();
+              setSearchQuery(el.dataset.example);
+            });
+          });
+        })();
+      </script>
+      <button class="btn btn-outline-secondary add-filter mt-2" type="button" data-filter="search_query">Apply
+        Search</button>
     </div>
     <div class="col-12 col-sm-6 col-md-4">
         <div class="input-group mb-3">

@@ -1,5 +1,6 @@
 # pylint: disable=global-statement,redefined-outer-name
 import argparse
+import re
 import csv
 import glob
 import keras
@@ -19,74 +20,255 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 
-indices = ['wildchat', 'lmsyschat']
-supported_fields = {'wildchat': ['dataset', 'toxic', 'redacted', 'model', 'hashed_ip', 'language', 'country', 'state', 'min_turns', 'conversation_id'],
-                        'lmsyschat': ['dataset', 'toxic', 'redacted', 'model', 'language', 'min_turns', 'conversation_id']}
-def build_query_for_index(index_name, filters, contains, from_, size_):
-    # Build Elasticsearch query
-    must_clauses = []
-    if contains:
-        must_clauses.append({
-            "nested": {
-                "path": "conversation",
-                "query": {
-                    "match_phrase": {
-                        "conversation.content": contains
-                    }
-                }
-            }
-        })
-    if filters['toxic']:
-        if index_name == 'wildchat':
-            must_clauses.append({"term": {"toxic": filters['toxic'] == 'true'}})
-        else:
-            must_clauses.append({
-            "nested": {
-                "path": "openai_moderation",
-                "query": {
-                    "term": {"openai_moderation.flagged": filters['toxic'] == 'true'}
-                }
-            }
-        })
-    if filters['redacted']:
-        must_clauses.append({"term": {"redacted": filters['redacted'] == 'true'}})
-    if filters['model']:
-        must_clauses.append({"term": {"model": filters['model']}})
-    if filters['hashed_ip']:
-        if index_name == 'wildchat':
-            must_clauses.append({"term": {"hashed_ip": filters['hashed_ip']}})
-    if filters['language']:
-        must_clauses.append({"term": {"language": filters['language'].title()}})
-    if filters['country']:
-        if index_name == 'wildchat':
-            must_clauses.append({"term": {"country": filters['country']}})
-    if filters['state']:
-        if index_name == 'wildchat':
-            must_clauses.append({"term": {"state": filters['state']}})
-    if filters['min_turns']:
-        must_clauses.append({"range": {"turn": {"gte": int(filters['min_turns'])}}})
-    if filters['conversation_id']:
-        if index_name == 'wildchat':
-            must_clauses.append({"nested": {"path": "conversation", "query": {"term": {"conversation.turn_identifier": filters['conversation_id']}}}})
-        else:
-            must_clauses.append({"term": {"conversation_id": filters['conversation_id']}})
+indices = ["wildchat", "lmsyschat"]
+supported_fields = {
+    "wildchat": [
+        "dataset",
+        "toxic",
+        "redacted",
+        "model",
+        "hashed_ip",
+        "language",
+        "country",
+        "state",
+        "min_turns",
+        "conversation_id",
+    ],
+    "lmsyschat": [
+        "dataset",
+        "toxic",
+        "redacted",
+        "model",
+        "language",
+        "min_turns",
+        "conversation_id",
+    ],
+}
 
 
-    search_query = {
-        "query": {
-            "bool": {
-                "must": must_clauses if must_clauses else {"match_all": {}}
-            }
-        },
-        "from": from_,
-        "size": size_
+def parse_search_query(query_string):
+    """
+    Parse search query string into structured format.
+
+    Syntax: contains:"text"[&turn:(user|assistant)] nocontains:"text"[&turn:(user|assistant)]
+
+    Returns:
+        List of dicts: [
+            {'type': 'contains', 'text': 'Hello', 'turn_role': 'user'},
+            {'type': 'nocontains', 'text': 'python', 'turn_role': None}
+        ]
+    """
+    if not query_string or not query_string.strip():
+        return []
+
+    pattern = r'(contains|nocontains):"([^"]+)"(?:&turn:(user|assistant))?'
+
+    parsed = []
+    for match in re.finditer(pattern, query_string, re.IGNORECASE):
+        query_type = match.group(1).lower()
+        text = match.group(2)
+        turn_role = match.group(3).lower() if match.group(3) else None
+
+        parsed.append({"type": query_type, "text": text, "turn_role": turn_role})
+
+    if not parsed:
+        parsed.append(
+            {"type": "contains", "text": query_string.strip(), "turn_role": None}
+        )
+
+    return parsed
+
+
+def build_pagination_url(page_num, request_args):
+    """
+    Build a pagination URL that preserves all current query parameters.
+
+    Args:
+        page_num: The page number to link to
+        request_args: The request.args object from Flask
+
+    Returns:
+        String URL with all parameters preserved
+    """
+    params = {}
+
+    # Copy all existing parameters except 'page'
+    for key in request_args:
+        if key != "page":
+            params[key] = request_args[key]
+
+    # Add the new page number
+    params["page"] = page_num
+
+    # Build URL
+    return "?" + urlencode(params)
+
+
+def build_content_query(query_item):
+    """
+    Build nested Elasticsearch query for a single contains/nocontains item.
+
+    Args:
+        query_item: Dict with 'type', 'text', and optional 'turn_role'
+
+    Returns:
+        Elasticsearch nested query dict
+    """
+    must_clauses = [{"match_phrase": {"conversation.content": query_item["text"]}}]
+
+    # Add turn role constraint if specified
+    if query_item["turn_role"]:
+        must_clauses.append({"term": {"conversation.role": query_item["turn_role"]}})
+
+    return {
+        "nested": {"path": "conversation", "query": {"bool": {"must": must_clauses}}}
     }
 
-    if must_clauses:
-        any_filters = True
+
+def validate_search_query(query_string):
+    """
+    Validate search query syntax and return error message if invalid.
+
+    Returns:
+        None if valid, error message string if invalid
+    """
+    if not query_string or not query_string.strip():
+        return None
+
+    # Check for unmatched quotes
+    if query_string.count('"') % 2 != 0:
+        return "Unmatched quotes in query"
+
+    # Check if any valid patterns found
+    pattern = r'(contains|nocontains):"([^"]+)"(?:&turn:(user|assistant))?'
+    matches = list(re.finditer(pattern, query_string, re.IGNORECASE))
+
+    if not matches:
+        return None  # Plain text is valid - will be treated like a contains: search for backward compatability
+
+    # Check for empty search text in structured queries
+    for match in matches:
+        if not match.group(2).strip():
+            return "Empty search text not allowed"
+
+    return None
+
+
+def build_query_for_index(index_name, filters, search_query, from_, size_):
+    """
+    Build Elasticsearch query combining search_query and filters.
+
+    Args:
+        index_name: 'wildchat' or 'lmsyschat'
+        filters: Dict of metadata filters (toxic, language, etc.)
+        search_query: String with advanced query syntax
+        from_: Pagination start
+        size_: Number of results
+
+    Returns:
+        Tuple: (query_dict, any_filters_applied)
+    """
+    # Parse search query
+    parsed_queries = parse_search_query(search_query)
+
+    must_clauses = []
+    must_not_clauses = []
+
+    # Build content queries from parsed search
+    for q in parsed_queries:
+        content_query = build_content_query(q)
+
+        if q["type"] == "contains":
+            must_clauses.append(content_query)
+        elif q["type"] == "nocontains":
+            must_not_clauses.append(content_query)
+
+    # Add existing filter logic
+    if filters["toxic"]:
+        if index_name == "wildchat":
+            must_clauses.append({"term": {"toxic": filters["toxic"] == "true"}})
+        else:
+            must_clauses.append(
+                {
+                    "nested": {
+                        "path": "openai_moderation",
+                        "query": {
+                            "term": {
+                                "openai_moderation.flagged": filters["toxic"] == "true"
+                            }
+                        },
+                    }
+                }
+            )
+
+    if filters["redacted"]:
+        must_clauses.append({"term": {"redacted": filters["redacted"] == "true"}})
+
+    if filters["model"]:
+        must_clauses.append({"term": {"model": filters["model"]}})
+
+    if filters["hashed_ip"]:
+        must_clauses.append({"term": {"hashed_ip": filters["hashed_ip"]}})
+
+    if filters["language"]:
+        must_clauses.append({"term": {"language": filters["language"]}})
+
+    if filters["country"]:
+        must_clauses.append({"term": {"country": filters["country"]}})
+
+    if filters["state"] and index_name == "wildchat":
+        must_clauses.append({"term": {"state": filters["state"]}})
+
+    # Note: ElasticSearch based min_turns filtering is disabled due to conflict with nested content queries
+    # Filtering is done post-query in Python instead
+    # if filters['min_turns']:
+    #     must_clauses.append({
+    #         "script": {
+    #             "script": {
+    #                 "source": "params._source.conversation.size() >= params.min_turns",
+    #                 "params": {"min_turns": int(filters['min_turns'])}
+    #             }
+    #         }
+    #     })
+
+    if filters["conversation_id"]:
+        if index_name == "wildchat":
+            must_clauses.append(
+                {
+                    "nested": {
+                        "path": "conversation",
+                        "query": {
+                            "term": {
+                                "conversation.turn_identifier": filters[
+                                    "conversation_id"
+                                ]
+                            }
+                        },
+                    }
+                }
+            )
+        else:
+            must_clauses.append(
+                {"term": {"conversation_id": filters["conversation_id"]}}
+            )
+
+    # Check if any filters applied
+    any_filters = bool(must_clauses or must_not_clauses)
+
+    # Build final query
+    if any_filters:
+        bool_query = {}
+        if must_clauses:
+            bool_query["must"] = must_clauses
+        if must_not_clauses:
+            bool_query["must_not"] = must_not_clauses
+
+        query = {"query": {"bool": bool_query}, "from": from_, "size": size_}
     else:
-        any_filters = False
-    return search_query, any_filters
+        query = {"query": {"match_all": {}}, "from": from_, "size": size_}
+
+    return query, any_filters
+
 
 def nl2br(value):
     escaped_value = escape(value)
@@ -225,23 +407,29 @@ def favicon():
 @app.route("/")
 def index():
     data = _data()
-    contains = request.args.get('contains', '')
-    page = int(request.args.get('page', 1))
+    search_query = request.args.get("search_query", "")  # CHANGED from 'contains'
+    page = int(request.args.get("page", 1))
 
     # Construct the Elasticsearch query
     filters = {
-        "dataset": request.args.get('dataset', ''),
-        "toxic": request.args.get('toxic', ''),
-        "redacted": request.args.get('redacted', ''),
-        "model": request.args.get('model', ''),
-        "hashed_ip": request.args.get('hashed_ip', ''),
-        "language": request.args.get('language', ''),
-        "country": request.args.get('country', ''),
-        "state": request.args.get('state', ''),
-        "min_turns": request.args.get('min_turns', ''),
-        "conversation_id": request.args.get('conversation_id', '')
+        "dataset": request.args.get("dataset", ""),
+        "toxic": request.args.get("toxic", ""),
+        "redacted": request.args.get("redacted", ""),
+        "model": request.args.get("model", ""),
+        "hashed_ip": request.args.get("hashed_ip", ""),
+        "language": request.args.get("language", ""),
+        "country": request.args.get("country", ""),
+        "state": request.args.get("state", ""),
+        "min_turns": request.args.get("min_turns", ""),
+        "conversation_id": request.args.get("conversation_id", ""),
     }
 
+    # Validate search query
+    error = validate_search_query(search_query)
+    if error:
+        data["error"] = error
+        data["search_query"] = search_query
+        return render_template("index.html", **data)
 
     disabled_datasets = []
     for dataset in indices:
@@ -250,45 +438,79 @@ def index():
                 if field not in supported_fields[dataset]:
                     disabled_datasets.append(dataset)
     indices_to_search = []
-    if (filters['dataset'] == '' or filters['dataset'] == 'wildchat') and 'wildchat' not in disabled_datasets:
-        indices_to_search.append('wildchat')
-    if (filters['dataset'] == '' or filters['dataset'] == 'lmsyschat') and 'lmsyschat' not in disabled_datasets:
-        indices_to_search.append('lmsyschat')
+    if (
+        filters["dataset"] == "" or filters["dataset"] == "wildchat"
+    ) and "wildchat" not in disabled_datasets:
+        indices_to_search.append("wildchat")
+    if (
+        filters["dataset"] == "" or filters["dataset"] == "lmsyschat"
+    ) and "lmsyschat" not in disabled_datasets:
+        indices_to_search.append("lmsyschat")
     size = max(30 // len(indices_to_search), 1)
     from_ = (page - 1) * size
     if from_ >= 10000:
-        return render_template("error.html", message="You cannot navigate beyond the 10,000th result. Please refine your search by going to earlier pages.")
-    if from_+size > 10000:
+        return render_template(
+            "error.html",
+            message="You cannot navigate beyond the 10,000th result. Please refine your search by going to earlier pages.",
+        )
+    if from_ + size > 10000:
         size_ = 10000 - from_
     else:
         size_ = size
 
     any_filters = False
-    if 'dataset' in filters and filters['dataset'] != '':
+    if "dataset" in filters and filters["dataset"] != "":
         any_filters = True
     conversations = []
     total = 0
     assert len(indices_to_search) > 0
     for index_name in indices_to_search:
         # Execute search query
-        search_query, any_filters_ = build_query_for_index(index_name, filters, contains, from_, size_)
+        search_query_obj, any_filters_ = build_query_for_index(
+            index_name,
+            filters,
+            search_query,
+            from_,
+            size_,
+        )
         any_filters = any_filters or any_filters_
-        response = es.search(index=index_name, body=search_query)
-        conversations_raw = [hit['_source'] for hit in response['hits']['hits']]
+        response = es.search(index=index_name, body=search_query_obj)
+        conversations_raw = [hit["_source"] for hit in response["hits"]["hits"]]
 
         for conversation_raw in conversations_raw:
             conversation = {}
-            conversation['dataset'] = index_name
-            for key in ['timestamp', 'country', 'state', 'hashed_ip', 'model', 'toxic', 'redacted', 'conversation', 'conversation_id']:
+            conversation["dataset"] = index_name
+            for key in [
+                "timestamp",
+                "country",
+                "state",
+                "hashed_ip",
+                "model",
+                "toxic",
+                "redacted",
+                "conversation",
+                "conversation_id",
+            ]:
                 if key in conversation_raw:
                     conversation[key] = conversation_raw[key]
-            if index_name == 'wildchat':
-                conversation['conversation_id'] = conversation_raw['conversation'][0]['turn_identifier']
-            if index_name == 'lmsyschat':
-                conversation['toxic'] = any([item['flagged'] for item in conversation_raw['openai_moderation']])
+
+            # Min turn filtering happens post-query in Python
+            if filters["min_turns"]:
+                min_turns_required = int(filters["min_turns"])
+                if len(conversation_raw.get("conversation", [])) < min_turns_required:
+                    continue  # Skip this conversation - min turns too small
+
+            if index_name == "wildchat":
+                conversation["conversation_id"] = conversation_raw["conversation"][0][
+                    "turn_identifier"
+                ]
+            if index_name == "lmsyschat":
+                conversation["toxic"] = any(
+                    [item["flagged"] for item in conversation_raw["openai_moderation"]]
+                )
             conversations.append(conversation)
-        total = max(total, response['hits']['total']['value'])
-    #total_pages = (total // size) + 1
+        total = max(total, response["hits"]["total"]["value"])
+    # total_pages = (total // size) + 1
     total_pages = (total + size - 1) // size
     random.seed(1234)
     random.shuffle(conversations)
@@ -299,44 +521,45 @@ def index():
         if page > 3:
             pages.append(1)
             if page > 4:
-                pages.append('...')
+                pages.append("...")
         pages.extend(range(max(1, page - 2), min(total_pages + 1, page + 3)))
         if page < total_pages - 3:
             if page < total_pages - 4:
-                pages.append('...')
+                pages.append("...")
             pages.append(total_pages)
-    #import pdb; pdb.set_trace()
-    data.update({
-        "conversations": conversations,
-        "contains": contains,
-        "page": page,
-        "pages": pages,
-        "total": total,
-        "filters": filters,
-        "any_filters": any_filters
-    })
+    # import pdb; pdb.set_trace()
+    data.update(
+        {
+            "conversations": conversations,
+            "search_query": search_query,
+            "page": page,
+            "pages": pages,
+            "total": total,
+            "filters": filters,
+            "any_filters": any_filters,
+            "build_pagination_url": lambda p: build_pagination_url(p, request.args),
+        }
+    )
     return render_template("index.html", **data)
 
-@app.route('/search_embeddings', methods=['POST'])
+
+@app.route("/search_embeddings", methods=["POST"])
 def search_embeddings():
     filters = request.json
-    search_expansion_limit = filters['search_expansion_limit']
-    del filters['search_expansion_limit']
-    if search_expansion_limit == '':
-        search_expansion_limit = '100'
+    search_expansion_limit = filters["search_expansion_limit"]
+    del filters["search_expansion_limit"]
+    if search_expansion_limit == "":
+        search_expansion_limit = "100"
     search_expansion_limit = int(search_expansion_limit)
     search_expansion_limit = max(0, min(search_expansion_limit, 2000))
 
-    contains = filters['contains']
-    del filters['contains']
-    visualization_language = filters['visualization_language']
-    del filters['visualization_language']
+    search_query = filters["search_query"]
+    del filters["search_query"]
+    visualization_language = filters["visualization_language"]
+    del filters["visualization_language"]
 
-
-    #scaler = embedding_projectors[language]['scaler']
-    #umap = embedding_projectors[language]['umap']
     umap_encoder = embedding_projectors[visualization_language]
-    #print (filters)
+
     disabled_datasets = []
     for dataset in indices:
         for field in filters:
@@ -344,80 +567,104 @@ def search_embeddings():
                 if field not in supported_fields[dataset]:
                     disabled_datasets.append(dataset)
     indices_to_search = []
-    if (filters['dataset'] == '' or filters['dataset'] == 'wildchat') and 'wildchat' not in disabled_datasets:
-        indices_to_search.append('wildchat')
-    if (filters['dataset'] == '' or filters['dataset'] == 'lmsyschat') and 'lmsyschat' not in disabled_datasets:
-        indices_to_search.append('lmsyschat')
+    if (
+        filters["dataset"] == "" or filters["dataset"] == "wildchat"
+    ) and "wildchat" not in disabled_datasets:
+        indices_to_search.append("wildchat")
+    if (
+        filters["dataset"] == "" or filters["dataset"] == "lmsyschat"
+    ) and "lmsyschat" not in disabled_datasets:
+        indices_to_search.append("lmsyschat")
     any_filters = False
-    #import pdb; pdb.set_trace()
+
     for index_name in indices_to_search:
         # Execute search query
-        search_query, any_filters_ = build_query_for_index(index_name, filters, contains, 0, 10000)
+        search_query_obj, any_filters_ = build_query_for_index(
+            index_name, filters, search_query, 0, 10000
+        )
         any_filters = any_filters or any_filters_
+
     conversations = []
     if any_filters:
-        if (('language' not in filters) or (not filters['language'])) and (visualization_language != 'all'):
-            filters['language'] = visualization_language
+        if (("language" not in filters) or (not filters["language"])) and (
+            visualization_language != "all"
+        ):
+            filters["language"] = visualization_language
         conversation_ids = set([])
         for index_name in indices_to_search:
-            # Execute search query
-            search_query, any_filters_ = build_query_for_index(index_name, filters, contains, 0, 10000)
-            response = es.search(index=index_name + '_subset_' + visualization_language, body=search_query)
-            conversations_raw = [hit['_source'] for hit in response['hits']['hits']]
-
+            search_query_obj, any_filters_ = build_query_for_index(
+                index_name, filters, search_query, 0, search_expansion_limit
+            )
+            response = es.search(index=f"{index_name}_subset", body=search_query_obj)
+            if response["hits"]["total"]["value"] < 30:
+                response = es.search(index=index_name, body=search_query_obj)
+            conversations_raw = [hit["_source"] for hit in response["hits"]["hits"]]
             for conversation_raw in conversations_raw:
                 conversation = {}
-                conversation['dataset'] = index_name
-                for key in ['conversation', 'conversation_id']:
+                conversation["dataset"] = index_name
+                for key in [
+                    "timestamp",
+                    "country",
+                    "state",
+                    "hashed_ip",
+                    "model",
+                    "toxic",
+                    "redacted",
+                    "conversation",
+                    "conversation_id",
+                ]:
                     if key in conversation_raw:
                         conversation[key] = conversation_raw[key]
-                if index_name == 'wildchat':
-                    conversation['conversation_id'] = conversation_raw['conversation'][0]['turn_identifier']
-                conversation_id = conversation['conversation_id']
+                if index_name == "lmsyschat":
+                    conversation["toxic"] = any(
+                        [
+                            item["flagged"]
+                            for item in conversation_raw["openai_moderation"]
+                        ]
+                    )
+                if index_name == "wildchat":
+                    conversation["conversation_id"] = conversation_raw["conversation"][
+                        0
+                    ]["turn_identifier"]
+                conversation_id = conversation["conversation_id"]
                 if conversation_id not in conversation_ids:
                     conversations.append(conversation)
                     conversation_ids.add(conversation_id)
-        if len(conversations) < search_expansion_limit and len(indices_to_search) > 0:
-            for index_name in indices_to_search:
-                # Execute search query
-                search_query, any_filters_ = build_query_for_index(index_name, filters, contains, 0, max(1, search_expansion_limit // len(indices_to_search)))
-                response = es.search(index=index_name, body=search_query)
-                conversations_raw = [hit['_source'] for hit in response['hits']['hits']]
-
-                for conversation_raw in conversations_raw:
-                    conversation = {}
-                    conversation['dataset'] = index_name
-                    for key in ['conversation', 'conversation_id']:
-                        if key in conversation_raw:
-                            conversation[key] = conversation_raw[key]
-                    if index_name == 'wildchat':
-                        conversation['conversation_id'] = conversation_raw['conversation'][0]['turn_identifier']
-                    conversation_id = conversation['conversation_id']
-                    if conversation_id not in conversation_ids:
-                        conversations.append(conversation)
-                        conversation_ids.add(conversation_id)
-    #conversations = [hit['_source']['conversation'] for hit in response['hits']['hits']]
 
     conversation_embeddings = {}
-    print ('#Matched Conversation:', len(conversations))
+    print("#Matched Conversation:", len(conversations))
     for conversation in conversations:
-        dataset = conversation['dataset']
-        conversation_id = conversation['conversation_id']
-        umap_database_name = f'umap_{visualization_language}_{dataset}_cache.db'
-        embed_database_name = f'{dataset}_embeddings_cache.db'
-        #create_database(umap_database_name)
+        dataset = conversation["dataset"]
+        conversation_id = conversation["conversation_id"]
+        umap_database_name = f"umap_{visualization_language}_{dataset}_cache.db"
+        embed_database_name = f"{dataset}_embeddings_cache.db"
+
         hit, embedding_2d = retrieve(umap_database_name, conversation_id)
         if not hit:
-            print ('not hit')
-            #import pdb; pdb.set_trace()
-            conversation_text = conversation['conversation'][0]['content']
+            print("not hit")
+            conversation_text = conversation["conversation"][0]["content"]
             conversation_text = conversation_text.strip()
             if not conversation_text:
                 continue
-            embedding = get_embedding_with_cache(embed_database_name, conversation_id, conversation_text, model='text-embedding-3-small')
+            embedding = get_embedding_with_cache(
+                embed_database_name,
+                conversation_id,
+                conversation_text,
+                model="text-embedding-3-small",
+            )
             embedding_2d = umap_encoder(np.array([embedding])).numpy()[0]
-            insert_or_update(umap_database_name, conversation_id, '', [float(embedding_2d[0]), float(embedding_2d[1])])
-        conversation_embeddings[str(conversation_id)] = {'i': conversation_id, 'e': [round(float(embedding_2d[0]), 4), round(float(embedding_2d[1]), 4)], 'c': conversation['conversation'][0]['content'], 'd': dataset}
+            insert_or_update(
+                umap_database_name,
+                conversation_id,
+                "",
+                [float(embedding_2d[0]), float(embedding_2d[1])],
+            )
+        conversation_embeddings[str(conversation_id)] = {
+            "i": conversation_id,
+            "e": [round(float(embedding_2d[0]), 4), round(float(embedding_2d[1]), 4)],
+            "c": conversation["conversation"][0]["content"],
+            "d": dataset,
+        }
     return jsonify(conversation_embeddings)
 
 
@@ -426,41 +673,36 @@ def search_embeddings():
 def embeddings(language=None):
     data = _data()
 
-    contains = request.args.get('contains', '')
+    search_query = request.args.get("search_query", "")
     # Construct the Elasticsearch query
     filters = {
-        "toxic": request.args.get('toxic', ''),
-        "redacted": request.args.get('redacted', ''),
-        "model": request.args.get('model', ''),
-        "hashed_ip": request.args.get('hashed_ip', ''),
-        "language": request.args.get('language', ''),
-        "country": request.args.get('country', ''),
-        "state": request.args.get('state', ''),
-        "min_turns": request.args.get('min_turns', ''),
-        "search_expansion_limit": request.args.get('search_expansion_limit', ''),
-        "conversation_id": request.args.get('conversation_id', '')
+        "toxic": request.args.get("toxic", ""),
+        "redacted": request.args.get("redacted", ""),
+        "model": request.args.get("model", ""),
+        "hashed_ip": request.args.get("hashed_ip", ""),
+        "language": request.args.get("language", ""),
+        "country": request.args.get("country", ""),
+        "state": request.args.get("state", ""),
+        "min_turns": request.args.get("min_turns", ""),
+        "search_expansion_limit": request.args.get("search_expansion_limit", ""),
+        "conversation_id": request.args.get("conversation_id", ""),
     }
-    #if language:
-    #    filters['language'] = language.capitalize()
-    #    any_filters = True
+
     any_filters = False
     for key in filters:
         if filters[key]:
             any_filters = True
-    if contains:
+    if search_query:
         any_filters = True
-    #must_clauses = []
-    #if must_clauses:
-    #    any_filters = True
-    #else:
-    #    any_filters = False
-    #data["papers"] = site_data["papers"]
-    data.update({
-        "contains": contains,
-        "filters": filters,
-        "any_filters": any_filters,
-        "visualization_language": language or "all"
-    })
+
+    data.update(
+        {
+            "search_query": search_query,
+            "filters": filters,
+            "any_filters": any_filters,
+            "visualization_language": language or "all",
+        }
+    )
     return render_template("embeddings.html", **data)
 
 def extract_list_field(v, key):
