@@ -20,8 +20,6 @@ import threading
 # Thread lock for database operations
 db_lock = threading.Lock()
 
-# Thread lock for embedding model
-model_lock = threading.Lock()
 n_per_language = 50000  # Adjust as needed
 LANGUAGES = ['all', 'english', 'chinese', 'russian', 'spanish', 'french', 'portuguese', 'german', 'italian', 'turkish', 'arabic', 'japanese', 'korean', 'polish', 'vietnamese']
 
