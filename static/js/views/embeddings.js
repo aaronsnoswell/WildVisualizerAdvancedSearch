@@ -27,7 +27,7 @@ $(document).ready(function () {
     // Function to set form values based on URL parameters
     function setFormValuesFromUrlParams() {
         let urlParams = new URLSearchParams(window.location.search);
-        $('#search-input').val(decodeURIComponent(urlParams.get('contains') || ''));
+        $('#search-query').val(decodeURIComponent(urlParams.get('search_query') || ''));
         $('#filter-toxic').val(decodeURIComponent(urlParams.get('toxic') || ''));
         $('#filter-redacted').val(decodeURIComponent(urlParams.get('redacted') || ''));
         $('#filter-dataset').val(decodeURIComponent(urlParams.get('dataset') || ''));
@@ -366,15 +366,24 @@ $(document).ready(function () {
         let urlParams = new URLSearchParams(window.location.search);
 
         if (urlParams.toString()) {
-            for (const [key, value] of urlParams.entries()) {
-                if (key !== 'page') {
+            for (const [key, value] of Object.entries(filters)) {
+                if (value) {
+                    let displayKey = key;
+                    if (key === 'redacted') {
+                        displayKey = 'Contains personal info';
+                    } else if (key === 'search_query') {
+                        displayKey = 'Search';
+                    } else {
+                        displayKey = key.charAt(0).toUpperCase() + key.slice(1);
+                    }
+
                     currentFiltersEl.append(`
-                      <li class="list-inline-item">
+                    <li class="list-inline-item">
                         <span class="badge badge-primary">
-                          ${key === 'redacted' ? 'Contains personal info' : key.charAt(0).toUpperCase() + key.slice(1)}: ${value}
-                          <a href="javascript:void(0)" class="remove-filter btn btn-outline-secondary" data-filter="${key}">&times;</a>
+                        ${displayKey}: ${value}
+                        <a href="javascript:void(0)" class="remove-filter btn btn-outline-secondary" data-filter="${key}">&times;</a>
                         </span>
-                      </li>
+                    </li>
                     `);
                 }
             }
@@ -391,89 +400,89 @@ $(document).ready(function () {
     };
 
 
-  const applyFilters = () => {
-      showLoading();
-      let urlParams = new URLSearchParams(window.location.search);
-      const filters = {
-          contains: $('#search-input').val(),
-          toxic: $('#filter-toxic').val(),
-          hashed_ip: $('#filter-hashed-ip').val(),
-          language: $('#filter-language').val(),
-          country: $('#filter-country').val(),
-          state: $('#filter-state').val(),
-          min_turns: $('#filter-min-turns').val(),
-          model: $('#filter-model').val(),
-          redacted: $('#filter-redacted').val(),
-          dataset: $('#filter-dataset').val(),
-          search_expansion_limit: $('#filter-search-expansion-limit').val(),
-          conversation_id: ''
-      };
-      // Update URL parameters
-      for (const [key, value] of Object.entries(filters)) {
-          if (value) {
-              urlParams.set(key, value);
-          } else {
-              urlParams.delete(key);
-          }
-      }
-      const queryString = Array.from(urlParams.entries())
-                          .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
-                          .join('&');
-      //const queryString = urlParams.toString();
-      const newUrl = queryString ? "?" + queryString : window.location.pathname;
-      window.history.replaceState(null, null, newUrl);
-      updateCurrentFilters();
-
-      const newFilters = {
-          ...filters, // Copy all existing key-value pairs from filters
-          visualization_language: visualizationLanguage
-      };
-
-
-      fetch('/search_embeddings', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(newFilters)
-      })
-      .then((response) => response.json())
-      .then((filteredEmbeddings) => {
-        const highlightIds = Object.keys(filteredEmbeddings);
-        //console.log(highlightIds);
-        const filteredData = highlightIds.map(id => ({
-          e: filteredEmbeddings[id].e,
-          i: filteredEmbeddings[id].i,
-          dataset: filteredEmbeddings[id].d,
-          c: filteredEmbeddings[id].c
-        }));
-
-        // Merge new data with existing data while avoiding duplicates
-        //filteredData.forEach(d => {
-        //  if (!allData.some(nd => nd.i === d.i)) {
-        //    allData.push(d);
-        //  }
-        //});
-        const mergedData = [...allData, ...filteredData].reduce((acc, d) => {
-            // Use d.i as the key in the Map
-            acc.set(d.i, d);
-            return acc;
-        }, new Map());
-
-        // Filter by dataset if the dataset filter is set
-        let uniqueDataArray = Array.from(mergedData.values());
-        const datasetFilter = $('#filter-dataset').val();
-        if (datasetFilter) {
-            uniqueDataArray = uniqueDataArray.filter(d => d.dataset === datasetFilter);
+    const applyFilters = () => {
+        showLoading();
+        let urlParams = new URLSearchParams(window.location.search);
+        const filters = {
+            search_query: $('#search-query').val(),
+            toxic: $('#filter-toxic').val(),
+            hashed_ip: $('#filter-hashed-ip').val(),
+            language: $('#filter-language').val(),
+            country: $('#filter-country').val(),
+            state: $('#filter-state').val(),
+            min_turns: $('#filter-min-turns').val(),
+            model: $('#filter-model').val(),
+            redacted: $('#filter-redacted').val(),
+            dataset: $('#filter-dataset').val(),
+            search_expansion_limit: $('#filter-search-expansion-limit').val(),
+            conversation_id: ''
+        };
+        // Update URL parameters
+        for (const [key, value] of Object.entries(filters)) {
+            if (value) {
+                urlParams.set(key, value);
+            } else {
+                urlParams.delete(key);
+            }
         }
+        const queryString = Array.from(urlParams.entries())
+            .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+            .join('&');
+        //const queryString = urlParams.toString();
+        const newUrl = queryString ? "?" + queryString : window.location.pathname;
+        window.history.replaceState(null, null, newUrl);
+        updateCurrentFilters();
 
-        updateLayer(uniqueDataArray, highlightIds);
-        hideLoading();
-      })
-      .catch((error) => {
-        console.error('Error fetching filtered embeddings:', error);
-        hideLoading();
-      });
+        const newFilters = {
+            ...filters, // Copy all existing key-value pairs from filters
+            visualization_language: visualizationLanguage
+        };
+
+
+        fetch('/search_embeddings', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(newFilters)
+        })
+            .then((response) => response.json())
+            .then((filteredEmbeddings) => {
+                const highlightIds = Object.keys(filteredEmbeddings);
+                //console.log(highlightIds);
+                const filteredData = highlightIds.map(id => ({
+                    e: filteredEmbeddings[id].e,
+                    i: filteredEmbeddings[id].i,
+                    dataset: filteredEmbeddings[id].d,
+                    c: filteredEmbeddings[id].c
+                }));
+
+                // Merge new data with existing data while avoiding duplicates
+                //filteredData.forEach(d => {
+                //  if (!allData.some(nd => nd.i === d.i)) {
+                //    allData.push(d);
+                //  }
+                //});
+                const mergedData = [...allData, ...filteredData].reduce((acc, d) => {
+                    // Use d.i as the key in the Map
+                    acc.set(d.i, d);
+                    return acc;
+                }, new Map());
+
+                // Filter by dataset if the dataset filter is set
+                let uniqueDataArray = Array.from(mergedData.values());
+                const datasetFilter = $('#filter-dataset').val();
+                if (datasetFilter) {
+                    uniqueDataArray = uniqueDataArray.filter(d => d.dataset === datasetFilter);
+                }
+
+                updateLayer(uniqueDataArray, highlightIds);
+                hideLoading();
+            })
+            .catch((error) => {
+                console.error('Error fetching filtered embeddings:', error);
+                hideLoading();
+            });
     };
 
     function checkInputs() {
@@ -491,8 +500,8 @@ $(document).ready(function () {
     const removeFilter = function () {
         let urlParams = new URLSearchParams(window.location.search);
         let filter = $(this).data('filter');
-        if (filter == 'contains') {
-            $('#search-input').val('');
+        if (filter == 'search_query') {
+            $('#search-query').val('');
         } else if (filter == 'toxic') {
             $('#filter-toxic').val('');
         } else if (filter == 'redacted') {
